@@ -183,6 +183,15 @@ class Settings(BaseSettings):
         default=None, validation_alias="ENABLE_HAIKU_THINKING"
     )
 
+    # OpenRouter reasoning effort — string passed as `reasoning.effort` on every
+    # OpenRouter request when thinking is enabled. Forces the model into the
+    # specified reasoning mode (e.g. DeepSeek V4 Pro hybrid reasoner needs this
+    # explicitly because Claude Code only sends `budget_tokens`, not effort).
+    # Valid: "" | "low" | "medium" | "high" | "xhigh". Empty string = don't send.
+    openrouter_reasoning_effort: str = Field(
+        default="", validation_alias="OPENROUTER_REASONING_EFFORT"
+    )
+
     # ==================== HTTP Client Timeouts ====================
     http_read_timeout: float = Field(
         default=120.0, validation_alias="HTTP_READ_TIMEOUT"
