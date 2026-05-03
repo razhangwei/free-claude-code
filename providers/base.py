@@ -26,6 +26,9 @@ class ProviderConfig(BaseModel):
     http_write_timeout: float = 10.0
     http_connect_timeout: float = HTTP_CONNECT_TIMEOUT_DEFAULT
     enable_thinking: bool = True
+    # OpenRouter-only: forces `reasoning.effort` on every request when set.
+    # Empty string = don't send `effort` (let provider default apply).
+    openrouter_reasoning_effort: str = ""
     proxy: str = ""
     log_raw_sse_events: bool = False
     log_api_error_tracebacks: bool = False

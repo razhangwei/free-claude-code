@@ -45,6 +45,7 @@ class OpenRouterProvider(AnthropicMessagesTransport):
         return build_request_body(
             request,
             thinking_enabled=self._is_thinking_enabled(request, thinking_enabled),
+            reasoning_effort=self._config.openrouter_reasoning_effort,
         )
 
     def _request_headers(self) -> dict[str, str]:
