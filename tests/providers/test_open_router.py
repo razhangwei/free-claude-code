@@ -220,7 +220,6 @@ def test_build_request_body_strips_unsigned_thinking_history(open_router_provide
                 "assistant",
                 [
                     {"type": "thinking", "thinking": "hidden"},
-                    {"type": "redacted_thinking", "data": "opaque"},
                     {"type": "text", "text": "Hello"},
                 ],
             ),
@@ -230,10 +229,29 @@ def test_build_request_body_strips_unsigned_thinking_history(open_router_provide
 
     body = open_router_provider._build_request_body(req)
 
-    assert body["messages"][1]["content"] == [
-        {"type": "redacted_thinking", "data": "opaque"},
-        {"type": "text", "text": "Hello"},
-    ]
+    assert body["messages"][1]["content"] == [{"type": "text", "text": "Hello"}]
+
+
+def test_build_request_body_strips_redacted_thinking_history(open_router_provider):
+    """``redacted_thinking`` is an Anthropic-internal opaque marker that
+    downstream non-Anthropic backends (DeepSeek etc.) can't decode. The
+    OpenRouter path drops it on every request.
+    """
+    req = MockRequest(
+        messages=[
+            MockMessage(
+                "assistant",
+                [
+                    {"type": "redacted_thinking", "data": "opaque"},
+                    {"type": "text", "text": "Hello"},
+                ],
+            ),
+        ]
+    )
+
+    body = open_router_provider._build_request_body(req)
+
+    assert body["messages"][0]["content"] == [{"type": "text", "text": "Hello"}]
 
 
 def test_build_request_body_strips_redacted_when_thinking_disabled(
@@ -279,6 +297,147 @@ def test_build_request_body_preserves_signed_thinking_history(open_router_provid
     assert body["messages"][0]["content"] == [
         {"type": "thinking", "thinking": "signed", "signature": "sig_123"}
     ]
+
+
+def test_build_request_body_strips_redacted_thinking_next_to_tool_use(
+    open_router_provider,
+):
+    """Regression: redacted_thinking adjacent to tool_use breaks OpenRouter's
+    Anthropic→OpenAI translator (DeepSeek rejects with "insufficient tool
+    messages following tool_calls"). Strip redacted_thinking unconditionally
+    on the OpenRouter path.
+    """
+    req = MockRequest(
+        messages=[
+            MockMessage("user", "run the skill"),
+            MockMessage(
+                "assistant",
+                [
+                    {
+                        "type": "tool_use",
+                        "id": "call_abc",
+                        "name": "Skill",
+                        "input": {"skill": "x-digest"},
+                    },
+                    {"type": "redacted_thinking", "data": "opaque"},
+                ],
+            ),
+            MockMessage(
+                "user",
+                [{"type": "tool_result", "tool_use_id": "call_abc", "content": "ok"}],
+            ),
+        ]
+    )
+
+    body = open_router_provider._build_request_body(req)
+
+    assert body["messages"][1]["content"] == [
+        {
+            "type": "tool_use",
+            "id": "call_abc",
+            "name": "Skill",
+            "input": {"skill": "x-digest"},
+        },
+    ]
+
+
+def test_build_request_body_strips_empty_signature_thinking(open_router_provider):
+    """Regression: thinking block with empty-string signature must be stripped.
+
+    Claude Code occasionally emits thinking blocks with `"signature": ""` —
+    these are not actually signed (no Anthropic verification) and breaking
+    the OpenRouter request when paired with tool_use. Treat empty/whitespace
+    signature as unsigned.
+    """
+    req = MockRequest(
+        messages=[
+            MockMessage(
+                "assistant",
+                [
+                    {"type": "thinking", "thinking": "ponder", "signature": ""},
+                    {
+                        "type": "tool_use",
+                        "id": "call_xyz",
+                        "name": "Read",
+                        "input": {"path": "/tmp/x"},
+                    },
+                ],
+            ),
+            MockMessage(
+                "user",
+                [{"type": "tool_result", "tool_use_id": "call_xyz", "content": "ok"}],
+            ),
+        ]
+    )
+
+    body = open_router_provider._build_request_body(req)
+
+    assert body["messages"][0]["content"] == [
+        {
+            "type": "tool_use",
+            "id": "call_xyz",
+            "name": "Read",
+            "input": {"path": "/tmp/x"},
+        },
+    ]
+
+
+def test_build_request_body_splits_user_message_with_tool_result_and_text(
+    open_router_provider,
+):
+    """Regression: user messages mixing tool_result with text break OpenRouter.
+
+    OpenRouter's Anthropic→OpenAI translator emits each Anthropic content
+    block as a distinct OpenAI message. A user message of
+    ``[tool_result, text]`` becomes ``[tool, user]`` in OpenAI format —
+    which DeepSeek rejects with "insufficient tool messages following
+    tool_calls" because the orphan user message breaks the tool_calls/tool
+    pairing. Split into two messages so the tool message stands alone
+    immediately after the assistant's tool_calls.
+    """
+    req = MockRequest(
+        messages=[
+            MockMessage(
+                "assistant",
+                [
+                    {
+                        "type": "tool_use",
+                        "id": "call_skill",
+                        "name": "Skill",
+                        "input": {"skill": "x-digest"},
+                    }
+                ],
+            ),
+            MockMessage(
+                "user",
+                [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_skill",
+                        "content": "Launching skill",
+                    },
+                    {"type": "text", "text": "Skill body content"},
+                ],
+            ),
+        ]
+    )
+
+    body = open_router_provider._build_request_body(req)
+
+    assert body["messages"][1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_skill",
+                "content": "Launching skill",
+            }
+        ],
+    }
+    assert body["messages"][2] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "Skill body content"}],
+    }
 
 
 def test_build_request_body_flattens_system_blocks(open_router_provider):
