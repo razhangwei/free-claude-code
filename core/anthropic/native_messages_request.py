@@ -10,6 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from core.anthropic.content import get_block_attr, get_block_type
+
 _REQUEST_FIELDS = (
     "model",
     "messages",
@@ -114,8 +116,28 @@ def dump_raw_messages_request(request_data: Any) -> dict[str, Any]:
     return _dump_request_fields(request_data)
 
 
+def _is_signed_thinking(block: Any) -> bool:
+    """A thinking block is signed only when it carries a non-empty signature string."""
+    sig = get_block_attr(block, "signature")
+    return isinstance(sig, str) and bool(sig.strip())
+
+
+def _should_drop_assistant_block(
+    block: Any, *, thinking_enabled: bool, strip_redacted_thinking: bool
+) -> bool:
+    btype = get_block_type(block)
+    if btype == "thinking":
+        return not thinking_enabled or not _is_signed_thinking(block)
+    if btype == "redacted_thinking":
+        return not thinking_enabled or strip_redacted_thinking
+    return False
+
+
 def sanitize_native_messages_thinking_policy(
-    messages: Any, *, thinking_enabled: bool
+    messages: Any,
+    *,
+    thinking_enabled: bool,
+    strip_redacted_thinking: bool = False,
 ) -> Any:
     """Filter assistant message thinking blocks for upstream native Anthropic JSON.
 
@@ -123,18 +145,20 @@ def sanitize_native_messages_thinking_policy(
     history so disabled policy is not undermined by prior turns.
 
     When true, keep ``redacted_thinking`` and signed ``thinking``; remove only
-    unsigned plain ``thinking`` blocks (not replayable).
+    unsigned plain ``thinking`` blocks (not replayable). A ``thinking`` block
+    whose ``signature`` is missing, empty, or non-string is treated as unsigned.
+
+    ``strip_redacted_thinking`` also drops ``redacted_thinking`` blocks. Set on
+    the OpenRouter path: those opaque markers can't be decoded by non-Anthropic
+    backends and break OpenRouter's Anthropic→OpenAI translator when adjacent
+    to ``tool_use``.
     """
     if not isinstance(messages, list):
         return messages
 
     sanitized_messages: list[Any] = []
     for message in messages:
-        if not isinstance(message, dict):
-            sanitized_messages.append(message)
-            continue
-
-        if message.get("role") != "assistant":
+        if not isinstance(message, dict) or message.get("role") != "assistant":
             sanitized_messages.append(message)
             continue
 
@@ -143,31 +167,75 @@ def sanitize_native_messages_thinking_policy(
             sanitized_messages.append(message)
             continue
 
-        if not thinking_enabled:
-            sanitized_content = [
-                block
-                for block in content
-                if not (
-                    isinstance(block, dict)
-                    and block.get("type") in ("thinking", "redacted_thinking")
-                )
-            ]
-        else:
-            sanitized_content = [
-                block
-                for block in content
-                if not (
-                    isinstance(block, dict)
-                    and block.get("type") == "thinking"
-                    and not isinstance(block.get("signature"), str)
-                )
-            ]
+        sanitized_content = [
+            block
+            for block in content
+            if not _should_drop_assistant_block(
+                block,
+                thinking_enabled=thinking_enabled,
+                strip_redacted_thinking=strip_redacted_thinking,
+            )
+        ]
+
+        if sanitized_content == content:
+            sanitized_messages.append(message)
+            continue
 
         sanitized_message = dict(message)
         sanitized_message["content"] = sanitized_content or ""
         sanitized_messages.append(sanitized_message)
 
     return sanitized_messages
+
+
+def split_tool_result_user_messages(messages: Any) -> Any:
+    """Split user messages mixing ``tool_result`` with other block types.
+
+    OpenRouter's Anthropic→OpenAI translator emits each Anthropic content
+    block as a distinct OpenAI message. A user turn of ``[tool_result, text]``
+    (which Claude Code emits after Skill loads and similar tool patterns)
+    translates to ``[tool, user]`` — DeepSeek then rejects with "insufficient
+    tool messages following tool_calls" because the orphan user message breaks
+    the tool_calls/tool pairing.
+
+    Splitting into a tool_result-only message followed by a remainder message
+    preserves semantics and gives OpenRouter's translator a layout it handles.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    split_messages: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            split_messages.append(message)
+            continue
+
+        content = message.get("content")
+        if not isinstance(content, list):
+            split_messages.append(message)
+            continue
+
+        tool_result_blocks: list[Any] = []
+        other_blocks: list[Any] = []
+        for block in content:
+            if get_block_type(block) == "tool_result":
+                tool_result_blocks.append(block)
+            else:
+                other_blocks.append(block)
+
+        if not tool_result_blocks or not other_blocks:
+            split_messages.append(message)
+            continue
+
+        tool_result_message = dict(message)
+        tool_result_message["content"] = tool_result_blocks
+        split_messages.append(tool_result_message)
+
+        remainder_message = dict(message)
+        remainder_message["content"] = other_blocks
+        split_messages.append(remainder_message)
+
+    return split_messages
 
 
 def _normalize_system_prompt_for_openrouter(system: Any) -> Any:
@@ -252,7 +320,9 @@ def build_openrouter_native_request_body(
     body["messages"] = sanitize_native_messages_thinking_policy(
         body.get("messages"),
         thinking_enabled=thinking_enabled,
+        strip_redacted_thinking=True,
     )
+    body["messages"] = split_tool_result_user_messages(body["messages"])
     if "system" in body:
         body["system"] = _normalize_system_prompt_for_openrouter(body["system"])
     body["stream"] = True
