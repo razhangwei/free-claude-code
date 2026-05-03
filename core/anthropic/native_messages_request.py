@@ -184,12 +184,25 @@ def _normalize_system_prompt_for_openrouter(system: Any) -> Any:
     return "\n\n".join(text_parts).strip() if text_parts else system
 
 
-def _apply_openrouter_reasoning_policy(body: dict[str, Any], thinking_cfg: Any) -> None:
-    """Map Anthropic thinking controls onto OpenRouter reasoning controls."""
+def _apply_openrouter_reasoning_policy(
+    body: dict[str, Any],
+    thinking_cfg: Any,
+    *,
+    reasoning_effort: str = "",
+) -> None:
+    """Map Anthropic thinking controls onto OpenRouter reasoning controls.
+
+    When ``reasoning_effort`` is non-empty, force the OpenRouter ``reasoning.effort``
+    string (low/medium/high/xhigh). Required for hybrid reasoners like DeepSeek
+    V4 Pro that need an explicit mode selector — Claude Code only sends a
+    ``budget_tokens`` cap, which is treated as a ceiling, not a mode.
+    """
     reasoning = body.setdefault("reasoning", {"enabled": True})
     if not isinstance(reasoning, dict):
         return
     reasoning.setdefault("enabled", True)
+    if reasoning_effort:
+        reasoning["effort"] = reasoning_effort
     if not isinstance(thinking_cfg, dict):
         return
     budget_tokens = thinking_cfg.get("budget_tokens")
@@ -234,6 +247,7 @@ def build_openrouter_native_request_body(
     *,
     thinking_enabled: bool,
     default_max_tokens: int,
+    reasoning_effort: str = "",
 ) -> dict[str, Any]:
     """Build an Anthropic-format request body for OpenRouter (policy hooks built-in)."""
     dumped_request = _dump_request_fields(request_data)
@@ -260,6 +274,8 @@ def build_openrouter_native_request_body(
         body["max_tokens"] = default_max_tokens
 
     if thinking_enabled:
-        _apply_openrouter_reasoning_policy(body, thinking_cfg)
+        _apply_openrouter_reasoning_policy(
+            body, thinking_cfg, reasoning_effort=reasoning_effort
+        )
 
     return body

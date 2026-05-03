@@ -41,6 +41,7 @@ def _make_settings(**overrides):
     mock.http_write_timeout = 10.0
     mock.http_connect_timeout = 10.0
     mock.enable_model_thinking = True
+    mock.openrouter_reasoning_effort = ""
     mock.nim = NimSettings()
     for key, value in overrides.items():
         setattr(mock, key, value)
