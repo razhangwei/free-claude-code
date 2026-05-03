@@ -170,7 +170,10 @@ def sanitize_native_messages_thinking_policy(
                 if not (
                     isinstance(block, dict)
                     and block.get("type") == "thinking"
-                    and not isinstance(block.get("signature"), str)
+                    and not (
+                        isinstance(block.get("signature"), str)
+                        and block.get("signature", "").strip() != ""
+                    )
                 )
             ]
             if strip_redacted_thinking:
@@ -188,6 +191,60 @@ def sanitize_native_messages_thinking_policy(
         sanitized_messages.append(sanitized_message)
 
     return sanitized_messages
+
+
+def split_tool_result_user_messages(messages: Any) -> Any:
+    """Split user messages mixing tool_result with other block types.
+
+    OpenRouter's Anthropic→OpenAI translator emits each Anthropic content
+    block as a distinct OpenAI message. When a single user turn contains
+    ``[tool_result, text, ...]`` (which Claude Code does after Skill loads
+    and similar tool patterns), the translation produces a sequence like
+    ``[tool, user]`` — and DeepSeek then rejects the request as:
+
+      "An assistant message with 'tool_calls' must be followed by tool
+       messages responding to each 'tool_call_id'. (insufficient tool
+       messages following tool_calls message)"
+
+    Splitting the user message into two — one containing only tool_result
+    blocks, then one containing the remaining blocks — preserves semantics
+    and gives OpenRouter's translator a layout it handles correctly.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    out: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            out.append(message)
+            continue
+
+        content = message.get("content")
+        if not isinstance(content, list):
+            out.append(message)
+            continue
+
+        tool_result_blocks: list[Any] = []
+        other_blocks: list[Any] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_result_blocks.append(block)
+            else:
+                other_blocks.append(block)
+
+        if not tool_result_blocks or not other_blocks:
+            out.append(message)
+            continue
+
+        tool_msg = dict(message)
+        tool_msg["content"] = tool_result_blocks
+        out.append(tool_msg)
+
+        other_msg = dict(message)
+        other_msg["content"] = other_blocks
+        out.append(other_msg)
+
+    return out
 
 
 def _normalize_system_prompt_for_openrouter(system: Any) -> Any:
@@ -288,6 +345,7 @@ def build_openrouter_native_request_body(
         thinking_enabled=thinking_enabled,
         strip_redacted_thinking=True,
     )
+    body["messages"] = split_tool_result_user_messages(body["messages"])
     if "system" in body:
         body["system"] = _normalize_system_prompt_for_openrouter(body["system"])
     body["stream"] = True

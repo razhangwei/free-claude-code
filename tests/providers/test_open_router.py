@@ -331,6 +331,105 @@ def test_build_request_body_strips_redacted_thinking_next_to_tool_use(
     ]
 
 
+def test_build_request_body_strips_empty_signature_thinking(open_router_provider):
+    """Regression: thinking block with empty-string signature must be stripped.
+
+    Claude Code occasionally emits thinking blocks with `"signature": ""` —
+    these are not actually signed (no Anthropic verification) and breaking
+    the OpenRouter request when paired with tool_use. Treat empty/whitespace
+    signature as unsigned.
+    """
+    req = MockRequest(
+        messages=[
+            MockMessage(
+                "assistant",
+                [
+                    {"type": "thinking", "thinking": "ponder", "signature": ""},
+                    {
+                        "type": "tool_use",
+                        "id": "call_xyz",
+                        "name": "Read",
+                        "input": {"path": "/tmp/x"},
+                    },
+                ],
+            ),
+            MockMessage(
+                "user",
+                [{"type": "tool_result", "tool_use_id": "call_xyz", "content": "ok"}],
+            ),
+        ]
+    )
+
+    body = open_router_provider._build_request_body(req)
+
+    assert body["messages"][0]["content"] == [
+        {
+            "type": "tool_use",
+            "id": "call_xyz",
+            "name": "Read",
+            "input": {"path": "/tmp/x"},
+        },
+    ]
+
+
+def test_build_request_body_splits_user_message_with_tool_result_and_text(
+    open_router_provider,
+):
+    """Regression: user messages mixing tool_result with text break OpenRouter.
+
+    OpenRouter's Anthropic→OpenAI translator emits each Anthropic content
+    block as a distinct OpenAI message. A user message of
+    ``[tool_result, text]`` becomes ``[tool, user]`` in OpenAI format —
+    which DeepSeek rejects with "insufficient tool messages following
+    tool_calls" because the orphan user message breaks the tool_calls/tool
+    pairing. Split into two messages so the tool message stands alone
+    immediately after the assistant's tool_calls.
+    """
+    req = MockRequest(
+        messages=[
+            MockMessage(
+                "assistant",
+                [
+                    {
+                        "type": "tool_use",
+                        "id": "call_skill",
+                        "name": "Skill",
+                        "input": {"skill": "x-digest"},
+                    }
+                ],
+            ),
+            MockMessage(
+                "user",
+                [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_skill",
+                        "content": "Launching skill",
+                    },
+                    {"type": "text", "text": "Skill body content"},
+                ],
+            ),
+        ]
+    )
+
+    body = open_router_provider._build_request_body(req)
+
+    assert body["messages"][1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_skill",
+                "content": "Launching skill",
+            }
+        ],
+    }
+    assert body["messages"][2] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "Skill body content"}],
+    }
+
+
 def test_build_request_body_flattens_system_blocks(open_router_provider):
     req = MockRequest(
         system=[
