@@ -115,7 +115,10 @@ def dump_raw_messages_request(request_data: Any) -> dict[str, Any]:
 
 
 def sanitize_native_messages_thinking_policy(
-    messages: Any, *, thinking_enabled: bool
+    messages: Any,
+    *,
+    thinking_enabled: bool,
+    strip_redacted_thinking: bool = False,
 ) -> Any:
     """Filter assistant message thinking blocks for upstream native Anthropic JSON.
 
@@ -124,6 +127,14 @@ def sanitize_native_messages_thinking_policy(
 
     When true, keep ``redacted_thinking`` and signed ``thinking``; remove only
     unsigned plain ``thinking`` blocks (not replayable).
+
+    ``strip_redacted_thinking`` (OpenRouter-only override): always drop
+    ``redacted_thinking`` blocks regardless of ``thinking_enabled``. These are
+    opaque Anthropic-internal markers that downstream non-Anthropic models
+    (DeepSeek etc.) can't decode, and OpenRouter's Anthropic→OpenAI translator
+    breaks on them when they appear next to a ``tool_use`` block — emitting an
+    invalid_request_error: "An assistant message with 'tool_calls' must be
+    followed by tool messages responding to each 'tool_call_id'".
     """
     if not isinstance(messages, list):
         return messages
@@ -162,6 +173,15 @@ def sanitize_native_messages_thinking_policy(
                     and not isinstance(block.get("signature"), str)
                 )
             ]
+            if strip_redacted_thinking:
+                sanitized_content = [
+                    block
+                    for block in sanitized_content
+                    if not (
+                        isinstance(block, dict)
+                        and block.get("type") == "redacted_thinking"
+                    )
+                ]
 
         sanitized_message = dict(message)
         sanitized_message["content"] = sanitized_content or ""
@@ -266,6 +286,7 @@ def build_openrouter_native_request_body(
     body["messages"] = sanitize_native_messages_thinking_policy(
         body.get("messages"),
         thinking_enabled=thinking_enabled,
+        strip_redacted_thinking=True,
     )
     if "system" in body:
         body["system"] = _normalize_system_prompt_for_openrouter(body["system"])

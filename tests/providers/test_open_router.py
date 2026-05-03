@@ -212,7 +212,16 @@ def test_build_request_body_default_max_tokens(open_router_provider):
     assert body["max_tokens"] == OPENROUTER_DEFAULT_MAX_TOKENS
 
 
-def test_build_request_body_strips_unsigned_thinking_history(open_router_provider):
+def test_build_request_body_strips_unsigned_and_redacted_thinking_history(
+    open_router_provider,
+):
+    """OpenRouter path drops unsigned thinking AND redacted_thinking blocks.
+
+    redacted_thinking is an Anthropic-internal opaque marker that downstream
+    non-Anthropic models (DeepSeek etc.) can't decode; OpenRouter's
+    Anthropic→OpenAI translator also breaks on them when they appear next to
+    a tool_use block (insufficient tool messages following tool_calls).
+    """
     req = MockRequest(
         messages=[
             MockMessage("user", "hello"),
@@ -231,7 +240,6 @@ def test_build_request_body_strips_unsigned_thinking_history(open_router_provide
     body = open_router_provider._build_request_body(req)
 
     assert body["messages"][1]["content"] == [
-        {"type": "redacted_thinking", "data": "opaque"},
         {"type": "text", "text": "Hello"},
     ]
 
@@ -278,6 +286,48 @@ def test_build_request_body_preserves_signed_thinking_history(open_router_provid
 
     assert body["messages"][0]["content"] == [
         {"type": "thinking", "thinking": "signed", "signature": "sig_123"}
+    ]
+
+
+def test_build_request_body_strips_redacted_thinking_next_to_tool_use(
+    open_router_provider,
+):
+    """Regression: redacted_thinking adjacent to tool_use breaks OpenRouter's
+    Anthropic→OpenAI translator (DeepSeek rejects with "insufficient tool
+    messages following tool_calls"). Strip redacted_thinking unconditionally
+    on the OpenRouter path.
+    """
+    req = MockRequest(
+        messages=[
+            MockMessage("user", "run the skill"),
+            MockMessage(
+                "assistant",
+                [
+                    {
+                        "type": "tool_use",
+                        "id": "call_abc",
+                        "name": "Skill",
+                        "input": {"skill": "x-digest"},
+                    },
+                    {"type": "redacted_thinking", "data": "opaque"},
+                ],
+            ),
+            MockMessage(
+                "user",
+                [{"type": "tool_result", "tool_use_id": "call_abc", "content": "ok"}],
+            ),
+        ]
+    )
+
+    body = open_router_provider._build_request_body(req)
+
+    assert body["messages"][1]["content"] == [
+        {
+            "type": "tool_use",
+            "id": "call_abc",
+            "name": "Skill",
+            "input": {"skill": "x-digest"},
+        },
     ]
 
 
