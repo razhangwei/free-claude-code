@@ -55,6 +55,8 @@ class OpenRouterProvider(AnthropicMessagesTransport):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
             "anthropic-version": _ANTHROPIC_VERSION,
+            "HTTP-Referer": "https://github.com/razhangwei/free-claude-code",
+            "X-OpenRouter-Title": "free-claude-code",
         }
 
     def _model_list_headers(self) -> dict[str, str]:
